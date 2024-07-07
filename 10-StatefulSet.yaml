@@ -15,34 +15,81 @@ spec:
         app: database
     spec:
       initContainers:
-      - name: init-mongo
-        image: mongo:4.4.29
+      - name: init-mysql
+        image: 192.168.56.200/mylittlerecipebook/mysql:1.0
         command:
         - "sh"
         - "-c"
         - >
           if [ $(hostname -s) == "mlr-dev-db-sfs-0" ]; then
-            until mongo --host mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local:27017 --eval 'rs.initiate({_id: "rs0", members: [{ _id: 0, host: "mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local:27017" }, { _id: 1, host: "mlr-dev-db-sfs-1.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local:27017" }, { _id: 2, host: "mlr-dev-db-sfs-2.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local:27017" }]})' || mongo --host mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local:27017 --eval 'rs.status()' | grep -q "myState" ; do sleep 10; done
+            mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "CREATE USER 'repl'@'%' IDENTIFIED BY '${MYSQL_REPLICATION_PASSWORD}'; GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%'; FLUSH PRIVILEGES;";
           fi
-      containers:
-      - name: mongodb
-        image: 192.168.56.200/mylittlerecipebook/mongo:4
-        ports:
-        - containerPort: 27017
         env:
-        - name: MONGO_REPLICA_SET
-          value: "rs0"
-        command:
-        - "mongod"
-        - "--bind_ip_all"
-        - "--replSet"
-        - "rs0"
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_ROOT_PASSWORD
+        - name: MYSQL_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_REPLICATION_PASSWORD
+      containers:
+      - name: mysql
+        image: 192.168.56.200/mylittlerecipebook/mysql:1.0
+        ports:
+        - containerPort: 3306
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_ROOT_PASSWORD
+        - name: MYSQL_DATABASE
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_DATABASE
+        - name: MYSQL_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_USER
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_PASSWORD
+        - name: MYSQL_REPLICATION_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_REPLICATION_USER
+        - name: MYSQL_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_REPLICATION_PASSWORD
         volumeMounts:
-        - name: mongodb-storage
-          mountPath: /data/db
+        - name: mysql-storage
+          mountPath: /var/lib/mysql
+        lifecycle:
+          postStart:
+            exec:
+              command:
+                - "sh"
+                - "-c"
+                - >
+                  if [ $(hostname -s) != "mlr-dev-db-sfs-0" ]; then
+                    until mysql -h mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW MASTER STATUS\G"; do sleep 10; done;
+                    MASTER_LOG_FILE=$(mysql -h mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW MASTER STATUS\G" | grep File: | awk '{print $2}');
+                    MASTER_LOG_POS=$(mysql -h mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW MASTER STATUS\G" | grep Position: | awk '{print $2}');
+                    mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "CHANGE MASTER TO MASTER_HOST='mlr-dev-db-sfs-0.mlr-dev-db-svc-sfs.mlr-dev-db-ns.svc.cluster.local', MASTER_USER='repl', MASTER_PASSWORD='${MYSQL_REPLICATION_PASSWORD}', MASTER_LOG_FILE='$MASTER_LOG_FILE', MASTER_LOG_POS=$MASTER_LOG_POS; START SLAVE;";
+                  fi
   volumeClaimTemplates:
   - metadata:
-      name: mongodb-storage
+      name: mysql-storage
     spec:
       accessModes: [ "ReadWriteOnce" ]
       resources:
